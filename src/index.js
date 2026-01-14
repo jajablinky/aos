@@ -92,6 +92,34 @@ if (argv.version) {
   process.exit(0)
 }
 
+// Handle TUI mode - this should be checked before other modes
+if (argv.tui || argv._[0] === 'tui') {
+  // Lazy load TUI to avoid affecting normal startup performance
+  import('./tui/run.js').then(async ({ default: runTui }) => {
+    // Extract process ID from arguments if provided
+    // Support both: aos tui <processId> and aos --tui <processId>
+    const tuiProcessId = argv._[1] || argv.process
+    const tuiOptions = {
+      processId: tuiProcessId,
+      argv,
+      walletFile: argv.wallet
+    }
+    
+    try {
+      await runTui(tuiOptions)
+    } catch (error) {
+      console.error('TUI Error:', error.message)
+      process.exit(1)
+    }
+  }).catch(error => {
+    console.error('Failed to load TUI:', error.message)
+    process.exit(1)
+  })
+  // Don't proceed to legacy mode - TUI handles everything
+  // Use process.exit to stop execution from continuing
+  process.exit(0)
+}
+
 if (argv.sqlite) {
   process.env.AOS_MODULE = getPkg().aos.sqlite
 }

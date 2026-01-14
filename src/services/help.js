@@ -49,6 +49,7 @@ export function help() {
     chalk.green('--cron [frequency]-[unit]') + '          Setup automated messages for your process for a given interval. For example: 1-minute, 30-seconds.',
     chalk.green('--monitor') + '                          Monitor and push cron outbox messages and spawns.',
     chalk.green('--get-blueprints [dir]') + '             Download blueprint Lua scripts to your current working directory.',
+    chalk.green('--tui [processId]') + '                  Launch Terminal UI (optional: specify process ID to connect to).',
     chalk.green('--gateway-url') + '                      Set Arweave gateway location.',
     chalk.green('--cu-url') + '                           Set Compute Unit location.',
     chalk.green('--mu-url') + '                           Set Messenger Unit location',
