@@ -5,7 +5,13 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import type { InputRenderable, KeyEvent } from "@opentui/core";
+import type {
+  CliRenderer,
+  InputRenderable,
+  KeyEvent,
+  ScrollBoxRenderable,
+  Selection,
+} from "@opentui/core";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
 import { LegacyPty } from "../../lib/legacy-pty.js";
 import { stripAnsi } from "../../lib/ansi.js";
@@ -19,9 +25,12 @@ import ConfirmExitDialog from "../../dialogs/ConfirmExitDialog.js";
 import type { TranscriptEntry } from "./types.js";
 
 const promptRegex = /[^\s>]+>\s?$/;
+let sharedPty: LegacyPty | null = null;
+let sharedPtyArgsKey = "";
 
 type SessionRouteProps = {
   args: string[];
+  renderer: CliRenderer;
 };
 
 export default function SessionRoute(props: SessionRouteProps) {
@@ -32,22 +41,37 @@ export default function SessionRoute(props: SessionRouteProps) {
   const [connectedLabel, setConnectedLabel] = createSignal("Launching...");
   const [lastActivity, setLastActivity] = createSignal(Date.now());
   const [inputValue, setInputValue] = createSignal("");
+  const [homeMode, setHomeMode] = createSignal(true);
   const [paletteOpen, setPaletteOpen] = createSignal(false);
   const [editorOpen, setEditorOpen] = createSignal(false);
   const [editorText, setEditorText] = createSignal("");
   const [helpOpen, setHelpOpen] = createSignal(false);
   const [confirmExitOpen, setConfirmExitOpen] = createSignal(false);
+  const [copyToast, setCopyToast] = createSignal("Copied selection");
+  const [copyToastVisible, setCopyToastVisible] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [tick, setTick] = createSignal(0);
-  const [bootLog, setBootLog] = createSignal("Waiting for PTY output...");
+  const [bootLog, setBootLog] = createSignal(
+    "Waiting for first message to start...",
+  );
 
   let pty: LegacyPty | null = null;
+  let exitHandler: ((code: number | undefined) => void) | null = null;
+  let errorHandler: ((message: string) => void) | null = null;
   let buffer = "";
   let entryId = 0;
   let inputElement: InputRenderable | undefined;
+  let transcriptElement: ScrollBoxRenderable | undefined;
+  let copyToastTimeout: ReturnType<typeof setTimeout> | null = null;
+  let lastCopiedText = "";
+  let stdoutInterceptionDisabled = false;
 
   const setInputRef = (node: InputRenderable) => {
     inputElement = node;
+  };
+
+  const setTranscriptRef = (node: ScrollBoxRenderable) => {
+    transcriptElement = node;
   };
 
   const terminalDimensions = useTerminalDimensions();
@@ -60,7 +84,9 @@ export default function SessionRoute(props: SessionRouteProps) {
   });
 
   const inputFocused = createMemo(
-    () => !paletteOpen() && !editorOpen() && !helpOpen() && !confirmExitOpen(),
+    () =>
+      homeMode() ||
+      (!paletteOpen() && !editorOpen() && !helpOpen() && !confirmExitOpen()),
   );
 
   const appendEntry = (
@@ -107,12 +133,32 @@ export default function SessionRoute(props: SessionRouteProps) {
     if (preview) {
       setBootLog(`PTY: ${preview.slice(0, 120)}`);
     }
-    const normalized = chunk.replace(/\r/g, "\n");
-    buffer += normalized;
+
+    const carriageParts = chunk.split("\r");
+    const tail = carriageParts.pop() ?? "";
+    if (carriageParts.length > 0) {
+      buffer = "";
+      carriageParts.forEach((part) => {
+        if (!part.includes("\n")) return;
+        const segmentLines = part.split("\n");
+        segmentLines.forEach((segmentLine) => {
+          if (!segmentLine.trim()) return;
+          detectProcess(segmentLine);
+          const kind = classifyLine(segmentLine);
+          appendEntry(segmentLine, kind);
+          if (detectPrompt(segmentLine)) {
+            markReady();
+          }
+        });
+      });
+    }
+
+    buffer += tail;
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
 
     lines.forEach((line) => {
+      if (!line.trim()) return;
       detectProcess(line);
       const kind = classifyLine(line);
       appendEntry(line, kind);
@@ -133,10 +179,53 @@ export default function SessionRoute(props: SessionRouteProps) {
     pty.writeLine(next);
   };
 
+  const ensurePty = (): void => {
+    if (pty) return;
+    setBootLog("Spawning PTY...");
+    try {
+      const argsKey = props.args.join("\u0000");
+      if (!sharedPty || sharedPtyArgsKey !== argsKey) {
+        sharedPty?.dispose();
+        sharedPty = new LegacyPty(props.args);
+        sharedPtyArgsKey = argsKey;
+      }
+      pty = sharedPty;
+      pty.on("data", handlePtyData);
+
+      exitHandler = (code) => {
+        appendEntry(`Legacy console exited (${code ?? 0}).`, "status");
+        setBootLog(`PTY exit: ${code ?? 0}`);
+      };
+      errorHandler = (message) => {
+        appendEntry(`PTY error: ${message}`, "status");
+        setBootLog(`PTY error: ${message}`);
+      };
+
+      pty.on("exit", exitHandler);
+      pty.on("error", errorHandler);
+      flushQueue();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      appendEntry(`Failed to spawn PTY: ${message}`, "status");
+      setBootLog(`PTY spawn error: ${message}`);
+    }
+  };
+
   const enqueueLine = (line: string): void => {
     if (!line.trim()) return;
     setQueue((items: string[]) => [...items, line]);
+    if (!pty) {
+      ensurePty();
+    }
     flushQueue();
+  };
+
+  const submitHome = (value: string): void => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    enqueueLine(trimmed);
+    setInputValue("");
+    setHomeMode(false);
   };
 
   const markReady = (): void => {
@@ -151,6 +240,28 @@ export default function SessionRoute(props: SessionRouteProps) {
     setEditorOpen(true);
     setMode("editor");
     pty.writeLine(".editor");
+  };
+
+  const showCopyToast = (message: string): void => {
+    setCopyToast(message);
+    setCopyToastVisible(true);
+    if (copyToastTimeout) {
+      clearTimeout(copyToastTimeout);
+    }
+    copyToastTimeout = setTimeout(() => {
+      setCopyToastVisible(false);
+      copyToastTimeout = null;
+    }, 1400);
+  };
+
+  const copyToClipboard = (text: string): void => {
+    if (!text.trim()) return;
+    if (!stdoutInterceptionDisabled) {
+      props.renderer.disableStdoutInterception();
+      stdoutInterceptionDisabled = true;
+    }
+    const encoded = Buffer.from(text, "utf8").toString("base64");
+    process.stdout.write(`\u001b]52;c;${encoded}\u001b\\`);
   };
 
   const submitEditor = (): void => {
@@ -174,6 +285,10 @@ export default function SessionRoute(props: SessionRouteProps) {
   };
 
   useKeyboard((key: KeyEvent) => {
+    if (homeMode()) {
+      return;
+    }
+
     if (editorOpen()) {
       if (key.name === "escape") {
         key.preventDefault?.();
@@ -208,6 +323,50 @@ export default function SessionRoute(props: SessionRouteProps) {
       return;
     }
 
+    if (key.name === "pageup") {
+      key.preventDefault?.();
+      transcriptElement?.scrollBy(-1, "viewport");
+      return;
+    }
+
+    if (key.name === "pagedown") {
+      key.preventDefault?.();
+      transcriptElement?.scrollBy(1, "viewport");
+      return;
+    }
+
+    if (key.name === "home") {
+      key.preventDefault?.();
+      const transcript = transcriptElement;
+      if (!transcript) return;
+      transcript.scrollTo({
+        x: transcript.scrollLeft,
+        y: 0,
+      });
+      return;
+    }
+
+    if (key.name === "end") {
+      key.preventDefault?.();
+      const transcript = transcriptElement;
+      if (!transcript) return;
+      transcript.scrollTo({
+        x: transcript.scrollLeft,
+        y: transcript.scrollHeight,
+      });
+      return;
+    }
+
+    if (key.name === "m" && key.ctrl) {
+      key.preventDefault?.();
+      props.renderer.useMouse = !props.renderer.useMouse;
+      appendEntry(
+        `Mouse scrolling ${props.renderer.useMouse ? "enabled" : "disabled"}.`,
+        "status",
+      );
+      return;
+    }
+
     if (key.name === "p" && key.ctrl) {
       key.preventDefault?.();
       setPaletteOpen(true);
@@ -239,29 +398,34 @@ export default function SessionRoute(props: SessionRouteProps) {
   });
 
   onMount(() => {
-    appendEntry("Starting legacy console...", "status");
-    try {
-      pty = new LegacyPty(props.args);
-      pty.on("data", handlePtyData);
-      pty.on("exit", (code) => {
-        appendEntry(`Legacy console exited (${code ?? 0}).`, "status");
-        setBootLog(`PTY exit: ${code ?? 0}`);
-      });
-      pty.on("error", (message) => {
-        appendEntry(`PTY error: ${message}`, "status");
-        setBootLog(`PTY error: ${message}`);
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      appendEntry(`Failed to spawn PTY: ${message}`, "status");
-      setBootLog(`PTY spawn error: ${message}`);
+    const handleSelection = (selection: Selection) => {
+      if (!selection.isActive || selection.isSelecting) return;
+      const text = selection.getSelectedText();
+      if (!text || text === lastCopiedText) return;
+      lastCopiedText = text;
+      copyToClipboard(text);
+      showCopyToast(`Copied ${text.length} chars`);
+    };
+
+    if (!stdoutInterceptionDisabled) {
+      props.renderer.disableStdoutInterception();
+      stdoutInterceptionDisabled = true;
     }
+
+    props.renderer.on("selection", handleSelection);
 
     const interval = setInterval(
       () => setTick((value: number) => value + 1),
       1000,
     );
-    onCleanup(() => clearInterval(interval));
+
+    onCleanup(() => {
+      props.renderer.off("selection", handleSelection);
+      if (copyToastTimeout) {
+        clearTimeout(copyToastTimeout);
+      }
+      clearInterval(interval);
+    });
   });
 
   createEffect(() => {
@@ -278,63 +442,144 @@ export default function SessionRoute(props: SessionRouteProps) {
   });
 
   onCleanup(() => {
-    pty?.dispose();
+    if (pty) {
+      pty.off("data", handlePtyData);
+      if (exitHandler) {
+        pty.off("exit", exitHandler);
+      }
+      if (errorHandler) {
+        pty.off("error", errorHandler);
+      }
+      pty.dispose();
+    }
+    if (pty && pty === sharedPty) {
+      sharedPty = null;
+      sharedPtyArgsKey = "";
+    }
   });
 
   return (
-    <box
-      flexDirection="column"
-      width="100%"
-      height="100%"
-      backgroundColor="transparent"
-    >
-      <TranscriptView entries={transcript()} />
-      <QueueStatusBar
-        connectedLabel={connectedLabel()}
-        mode={mode()}
-        activityLabel={activityLabel()}
-        activeLine={activeLine()}
-        queue={queue()}
-      />
-      <PromptInput
-        value={inputValue()}
-        focused={inputFocused()}
-        onChange={(value: string) => setInputValue(value)}
-        onSubmit={(value) => {
-          const trimmed = value.trim();
-          if (trimmed === ".editor") {
-            setInputValue("");
-            openEditor();
-            return;
-          }
-          enqueueLine(value);
-          setInputValue("");
-        }}
-        inputRef={setInputRef}
-      />
-      <box flexShrink={0} paddingLeft={1} paddingRight={1} paddingBottom={1}>
-        <text content={`Boot: ${bootLog()}`} style={{ fg: "#64748B" }} />
-      </box>
-      <CommandPalette
-        visible={paletteOpen()}
-        onClose={() => setPaletteOpen(false)}
-        onSelect={(command) => {
-          if (command === ".editor") {
-            openEditor();
-          } else {
-            setInputValue(command);
-          }
-        }}
-      />
-      <EditorDialog
-        visible={editorOpen()}
-        content={editorText()}
-        onChange={setEditorText}
-        onSubmit={submitEditor}
-        onCancel={cancelEditor}
-      />
-      <HelpDialog visible={helpOpen()} />
-      <ConfirmExitDialog visible={confirmExitOpen()} />
+    <box width="100%" height="100%">
+      {homeMode() ? (
+        <box
+          flexDirection="column"
+          alignItems="center"
+          justifyContent="center"
+          width="100%"
+          height="100%"
+        >
+          <text content="AOS" style={{ fg: "#E2E8F0" }} />
+          <box paddingTop={1} width="60%">
+            <box
+              border
+              borderStyle="single"
+              borderColor="#334155"
+              paddingLeft={1}
+              paddingRight={1}
+              paddingTop={1}
+              paddingBottom={1}
+              width="100%"
+            >
+              <input
+                ref={setInputRef}
+                value={inputValue()}
+                placeholder="Send a command to aos"
+                focused={inputFocused()}
+                onInput={setInputValue}
+                onSubmit={submitHome}
+                style={{
+                  textColor: "#E2E8F0",
+                  focusedTextColor: "#F8FAFC",
+                  backgroundColor: "transparent",
+                  focusedBackgroundColor: "transparent",
+                  placeholderColor: "#64748B",
+                  cursorColor: "#38BDF8",
+                }}
+              />
+            </box>
+          </box>
+          <box paddingTop={1}>
+            <text content="Press Enter to start" style={{ fg: "#64748B" }} />
+          </box>
+        </box>
+      ) : (
+        <box
+          flexDirection="column"
+          width="100%"
+          height="100%"
+          backgroundColor="#000"
+        >
+          <TranscriptView entries={transcript()} scrollRef={setTranscriptRef} />
+          <QueueStatusBar
+            connectedLabel={connectedLabel()}
+            mode={mode()}
+            activityLabel={activityLabel()}
+            activeLine={activeLine()}
+            queue={queue()}
+          />
+          <PromptInput
+            value={inputValue()}
+            focused={inputFocused()}
+            onChange={(value: string) => setInputValue(value)}
+            onSubmit={(value) => {
+              const trimmed = value.trim();
+              if (trimmed === ".editor") {
+                setInputValue("");
+                openEditor();
+                return;
+              }
+              enqueueLine(value);
+              setInputValue("");
+            }}
+            inputRef={setInputRef}
+          />
+          <box
+            flexShrink={0}
+            paddingLeft={1}
+            paddingRight={1}
+            paddingBottom={1}
+          >
+            <text content={`Boot: ${bootLog()}`} style={{ fg: "#64748B" }} />
+          </box>
+          <CommandPalette
+            visible={paletteOpen()}
+            onClose={() => setPaletteOpen(false)}
+            onSelect={(command) => {
+              if (command === ".editor") {
+                openEditor();
+              } else {
+                setInputValue(command);
+              }
+            }}
+          />
+          {/* <EditorDialog
+            visible={editorOpen()}
+            content={editorText()}
+            onChange={setEditorText}
+            onSubmit={submitEditor}
+            onCancel={cancelEditor}
+          />
+          <HelpDialog visible={helpOpen()} />
+          <ConfirmExitDialog visible={confirmExitOpen()} /> */}
+          {copyToastVisible() ? (
+            <box
+              position="absolute"
+              top={1}
+              right={2}
+              border
+              borderStyle="single"
+              borderColor="#38BDF8"
+              paddingLeft={1}
+              paddingRight={1}
+              paddingTop={0}
+              paddingBottom={0}
+              zIndex={40}
+            >
+              <text content={copyToast()} style={{ fg: "#38BDF8" }} />
+            </box>
+          ) : null}
+        </box>
+      )}
     </box>
   );
 }

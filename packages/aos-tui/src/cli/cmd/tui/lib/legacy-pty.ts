@@ -31,7 +31,7 @@ export class LegacyPty extends EventEmitter {
     super();
 
     const entryDir = path.dirname(fileURLToPath(import.meta.url));
-    const rootDir = path.resolve(entryDir, "../../../../../..");
+    const rootDir = path.resolve(entryDir, "../../../../../../..");
     const legacyEntry = path.resolve(rootDir, "src/index.js");
     const bridgeEntry = path.resolve(entryDir, "./pty-bridge.js");
 

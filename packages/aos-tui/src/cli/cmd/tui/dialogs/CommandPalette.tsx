@@ -44,7 +44,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
       paddingRight={1}
       paddingTop={1}
       paddingBottom={1}
-      backgroundColor="#0F172A"
+      backgroundColor="#000000"
       zIndex={20}
     >
       <box flexDirection="column" width="100%" height="100%">

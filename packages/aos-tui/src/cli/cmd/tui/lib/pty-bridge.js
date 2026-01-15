@@ -1,6 +1,8 @@
 import * as pty from "node-pty";
+import fs from "node:fs";
 import process from "node:process";
 import path from "node:path";
+import { createRequire } from "node:module";
 
 const [, , legacyEntry, ...args] = process.argv;
 
@@ -16,16 +18,59 @@ const send = (message) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 };
 
-const ptyProcess = pty.spawn(process.execPath, [legacyEntry, ...args], {
-  name: "xterm-256color",
-  cols,
-  rows,
-  cwd: process.cwd(),
-  env: {
-    ...process.env,
-    FORCE_COLOR: "1",
-  },
-});
+const require = createRequire(import.meta.url);
+const nodeBinary = process.env.NODE_BINARY || process.execPath;
+
+const ensureSpawnHelperExecutable = () => {
+  try {
+    const entry = require.resolve("node-pty");
+    const moduleRoot = path.resolve(path.dirname(entry), "..");
+    const helperPath = path.join(
+      moduleRoot,
+      "prebuilds",
+      `${process.platform}-${process.arch}`,
+      "spawn-helper",
+    );
+
+    if (!fs.existsSync(helperPath)) return;
+    const stats = fs.statSync(helperPath);
+    if ((stats.mode & 0o111) === 0) {
+      fs.chmodSync(helperPath, 0o755);
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[pty-bridge] Helper chmod failed: ${detail}\n`);
+  }
+};
+
+const spawnPty = (binary) =>
+  pty.spawn(binary, [legacyEntry, ...args], {
+    name: "xterm-256color",
+    cols,
+    rows,
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      FORCE_COLOR: "1",
+    },
+  });
+
+let ptyProcess;
+
+try {
+  ensureSpawnHelperExecutable();
+  ptyProcess = spawnPty(nodeBinary);
+} catch (error) {
+  const detail = error instanceof Error ? error.message : String(error);
+  process.stderr.write(
+    `[pty-bridge] Failed to spawn ${nodeBinary}: ${detail}\n`,
+  );
+  if (nodeBinary === process.execPath) {
+    throw error;
+  }
+  ensureSpawnHelperExecutable();
+  ptyProcess = spawnPty(process.execPath);
+}
 
 ptyProcess.onData((data) => send({ type: "data", data }));
 ptyProcess.onExit((event) => send({ type: "exit", code: event.exitCode }));

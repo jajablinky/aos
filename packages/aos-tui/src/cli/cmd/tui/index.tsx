@@ -1,3 +1,4 @@
+import { createCliRenderer } from "@opentui/core";
 import { render } from "@opentui/solid";
 import SessionRoute from "./routes/session/index.js";
 
@@ -12,9 +13,15 @@ process.on("unhandledRejection", (error) => {
 });
 
 try {
-  await render(() => <SessionRoute args={args} />, {
+  const renderer = await createCliRenderer({
     exitOnCtrlC: true,
+    useMouse: true,
+    backgroundColor: "#000000",
   });
+  await render(
+    () => <SessionRoute args={args} renderer={renderer} />,
+    renderer,
+  );
 } catch (error) {
   console.error("[aos-tui] Failed to render", error);
   process.exitCode = 1;
