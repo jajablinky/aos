@@ -54,6 +54,8 @@ export default function SessionRoute(props: SessionRouteProps) {
   const [bootLog, setBootLog] = createSignal(
     "Waiting for first message to start...",
   );
+  const [spinnerLabel, setSpinnerLabel] = createSignal<string | null>(null);
+  const [spinnerActive, setSpinnerActive] = createSignal(false);
 
   let pty: LegacyPty | null = null;
   let exitHandler: ((code: number | undefined) => void) | null = null;
@@ -83,6 +85,11 @@ export default function SessionRoute(props: SessionRouteProps) {
     return `Idle ${Math.round(delta / 1000)}s`;
   });
 
+  const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const spinnerFrame = createMemo(
+    () => spinnerFrames[tick() % spinnerFrames.length],
+  );
+
   const inputFocused = createMemo(
     () =>
       homeMode() ||
@@ -104,65 +111,37 @@ export default function SessionRoute(props: SessionRouteProps) {
     return promptRegex.test(clean);
   };
 
+  const stopSpinner = (): void => {
+    setSpinnerActive(false);
+    setSpinnerLabel(null);
+  };
+
   const detectProcess = (line: string): void => {
     const clean = stripAnsi(line);
     const match = clean.match(/Your AOS Process:\s+([A-Za-z0-9_-]+)/);
     if (match?.[1]) {
       setConnectedLabel(match[1]);
+      stopSpinner();
     }
-  };
-
-  const classifyLine = (line: string): TranscriptEntry["kind"] => {
-    const clean = stripAnsi(line).trim();
-    if (clean.startsWith(">")) return "input";
-    if (
-      clean.includes("Connecting") ||
-      clean.includes("Dispatching") ||
-      clean.includes("Signing") ||
-      clean.includes("Watching") ||
-      clean.includes("Exiting")
-    ) {
-      return "status";
-    }
-    return "output";
   };
 
   const handlePtyData = (chunk: string): void => {
     setLastActivity(Date.now());
-    const preview = stripAnsi(chunk).replace(/\s+/g, " ").trim();
-    if (preview) {
-      setBootLog(`PTY: ${preview.slice(0, 120)}`);
-    }
 
-    const carriageParts = chunk.split("\r");
-    const tail = carriageParts.pop() ?? "";
-    if (carriageParts.length > 0) {
-      buffer = "";
-      carriageParts.forEach((part) => {
-        if (!part.includes("\n")) return;
-        const segmentLines = part.split("\n");
-        segmentLines.forEach((segmentLine) => {
-          if (!segmentLine.trim()) return;
-          detectProcess(segmentLine);
-          const kind = classifyLine(segmentLine);
-          appendEntry(segmentLine, kind);
-          if (detectPrompt(segmentLine)) {
-            markReady();
-          }
-        });
-      });
-    }
-
-    buffer += tail;
+    buffer += chunk;
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
 
     lines.forEach((line) => {
-      if (!line.trim()) return;
+      const spinnerMatch = stripAnsi(line).match(/\[([^\]]+)\]/);
+      if (spinnerMatch?.[1]) {
+        setSpinnerLabel(spinnerMatch[1]);
+        setSpinnerActive(true);
+      }
       detectProcess(line);
-      const kind = classifyLine(line);
-      appendEntry(line, kind);
+      appendEntry(line, "output");
       if (detectPrompt(line)) {
+        stopSpinner();
         markReady();
       }
     });
@@ -193,11 +172,11 @@ export default function SessionRoute(props: SessionRouteProps) {
       pty.on("data", handlePtyData);
 
       exitHandler = (code) => {
-        appendEntry(`Legacy console exited (${code ?? 0}).`, "status");
+        appendEntry(`Legacy console exited (${code ?? 0}).`, "output");
         setBootLog(`PTY exit: ${code ?? 0}`);
       };
       errorHandler = (message) => {
-        appendEntry(`PTY error: ${message}`, "status");
+        appendEntry(`PTY error: ${message}`, "output");
         setBootLog(`PTY error: ${message}`);
       };
 
@@ -416,7 +395,7 @@ export default function SessionRoute(props: SessionRouteProps) {
 
     const interval = setInterval(
       () => setTick((value: number) => value + 1),
-      1000,
+      120,
     );
 
     onCleanup(() => {
@@ -503,13 +482,7 @@ export default function SessionRoute(props: SessionRouteProps) {
           </box>
         </box>
       ) : (
-        <box
-          flexDirection="column"
-          width="100%"
-          height="100%"
-          backgroundColor="#000"
-        >
-          <TranscriptView entries={transcript()} scrollRef={setTranscriptRef} />
+        <box flexDirection="column" width="100%" height="100%">
           <QueueStatusBar
             connectedLabel={connectedLabel()}
             mode={mode()}
@@ -517,6 +490,7 @@ export default function SessionRoute(props: SessionRouteProps) {
             activeLine={activeLine()}
             queue={queue()}
           />
+          <TranscriptView entries={transcript()} scrollRef={setTranscriptRef} />
           <PromptInput
             value={inputValue()}
             focused={inputFocused()}
@@ -532,15 +506,10 @@ export default function SessionRoute(props: SessionRouteProps) {
               setInputValue("");
             }}
             inputRef={setInputRef}
+            spinnerActive={spinnerActive()}
+            spinnerLabel={spinnerLabel()}
+            spinnerFrame={spinnerFrame()}
           />
-          <box
-            flexShrink={0}
-            paddingLeft={1}
-            paddingRight={1}
-            paddingBottom={1}
-          >
-            <text content={`Boot: ${bootLog()}`} style={{ fg: "#64748B" }} />
-          </box>
           <CommandPalette
             visible={paletteOpen()}
             onClose={() => setPaletteOpen(false)}
@@ -552,14 +521,14 @@ export default function SessionRoute(props: SessionRouteProps) {
               }
             }}
           />
-          {/* <EditorDialog
+          <EditorDialog
             visible={editorOpen()}
             content={editorText()}
             onChange={setEditorText}
             onSubmit={submitEditor}
             onCancel={cancelEditor}
           />
-          <HelpDialog visible={helpOpen()} />
+          {/* <HelpDialog visible={helpOpen()} />
           <ConfirmExitDialog visible={confirmExitOpen()} /> */}
           {copyToastVisible() ? (
             <box

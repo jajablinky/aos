@@ -16,22 +16,8 @@ type TranscriptViewProps = {
 
 export default function TranscriptView(props: TranscriptViewProps) {
   return (
-    <scrollbox
-      ref={props.scrollRef}
-      flexGrow={1}
-      border
-      borderStyle="single"
-      borderColor="#334155"
-      stickyScroll
-      stickyStart="bottom"
-      viewportCulling
-    >
-      <box
-        flexDirection="column"
-        paddingLeft={1}
-        paddingRight={1}
-        paddingBottom={1}
-      >
+    <scrollbox ref={props.scrollRef} flexGrow={1}>
+      <box flexDirection="column">
         {props.entries.map((entry) => (
           <text content={entry.content} style={{ fg: kindColor[entry.kind] }} />
         ))}
