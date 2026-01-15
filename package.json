@@ -10,7 +10,8 @@
   "bin": "./bin/aos.js",
   "workspaces": [
     "process",
-    "extensions/*"
+    "extensions/*",
+    "packages/*"
   ],
   "scripts": {
     "build-docs": "rm -rf process/docs && ldoc .",

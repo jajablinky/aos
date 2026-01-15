@@ -1,13 +1,24 @@
 #!/usr/bin/env node
-import url from 'url'
-import path from 'node:path'
-import os from 'node:os'
+import url from "node:url";
+import path from "node:path";
+import process from "node:process";
+import { spawn } from "node:child_process";
 
-let __dirname = url.fileURLToPath(new URL('.', import.meta.url))
+const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
+const legacyEntry = path.resolve(__dirname, "../src/index.js");
+const tuiEntry = path.resolve(__dirname, "../packages/aos-tui/bin/aos-tui.js");
 
-if (os.platform() === 'win32') {
-  __dirname = __dirname.replace(/\\/g, '/').replace(/^[A-Za-z]:\//, '/')
-  import(__dirname + '../src/index.js')
+const useLegacy = process.env.AOS_LEGACY === "1" || !process.stdin.isTTY;
+
+if (useLegacy) {
+  import(legacyEntry);
 } else {
-  import(path.resolve(__dirname + '../src/index.js'))
+  const child = spawn(process.execPath, [tuiEntry, ...process.argv.slice(2)], {
+    stdio: "inherit",
+    env: process.env,
+  });
+
+  child.on("exit", (code) => {
+    process.exit(code ?? 0);
+  });
 }

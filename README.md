@@ -10,6 +10,7 @@ AOS Version: 2.0.4
 ## Requirements
 
 - [NodeJS](https://nodejs.org) version 20+
+- [Bun](https://bun.sh) + [Zig](https://ziglang.org/learn/getting-started/) (required for the default OpenTUI interface)
 
 ## Getting Started
 
@@ -36,6 +37,14 @@ The current implementation of aos is using the ao wasm module and building with 
 ## For Developers
 
 The aos console is a command-line application that provides an easy to use DX experience to create Processes (aka Smart Contracts) on the ao Computer.
+
+### OpenTUI (default interface)
+
+AOS now launches the OpenTUI client by default. OpenTUI requires Bun + Zig.
+
+- Run the OpenTUI client locally: `bun packages/aos-tui/src/cli/cmd/tui/index.tsx [name/process-id]`
+- Run the legacy console: `AOS_LEGACY=1 aos [name/process-id]`
+- Direct legacy entry (for debugging): `node src/index.js [args]`
 
 ### Setup
 
